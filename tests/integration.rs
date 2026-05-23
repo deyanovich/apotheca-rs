@@ -42,6 +42,18 @@ fn deposit_different_bytes_collides_and_does_not_mutate() {
 }
 
 #[test]
+fn deposit_cas_stores_and_idempotent_redeposit() {
+    // SPEC §2.6: deposit_cas stores bytes under a caller-asserted CAS
+    // precondition. On the local backend it delegates to deposit, so
+    // idempotent re-deposit returns Ok.
+    let (_d, cella) = open();
+    let name = Name::new(b"cas-blob").unwrap();
+    assert_eq!(cella.deposit_cas(&name, b"payload").unwrap(), DepositOutcome::Ok);
+    assert_eq!(cella.deposit_cas(&name, b"payload").unwrap(), DepositOutcome::Ok);
+    assert_eq!(cella.get(&name).unwrap(), b"payload");
+}
+
+#[test]
 fn get_missing_name_is_not_found() {
     let (_d, cella) = open();
     let name = Name::new(b"missing").unwrap();

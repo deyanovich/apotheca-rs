@@ -5,11 +5,13 @@ by name, come out by name; *deposita* are never overwritten, *pinakes* update
 via compare-and-swap.
 
 This crate (`apotheca`, binary `apo`) is the Rust reference implementation of
-the apotheca protocol. It implements Phase 2: one local-filesystem backend,
-three operations on the depositum namespace (`deposit`, `get`, `stat`) and two
-on the pinax namespace (`get_pinax`, `set_pinax`), flat names. Multi-backend
-cellae, S3/scp/sftp transports, encryption-as-wrapper, and external
-configuration are not yet implemented.
+the apotheca protocol. It implements both surfaces — the depositum surface
+(`deposit`, `deposit_cas`, `get`, `stat`) and the pinax surface (`get_pinax`,
+`set_pinax`) — on two backends: a default dependency-free local-filesystem
+backend, and an S3-compatible backend (AWS S3, Cloudflare R2, MinIO) behind
+the `backend-s3` Cargo feature. Multi-backend cellae, GCS / Azure / scp / sftp
+transports, encryption-as-wrapper, and external configuration are not yet
+implemented.
 
 ## Install
 
@@ -23,7 +25,10 @@ The library:
 
 ```toml
 [dependencies]
-apotheca = "0.2"
+apotheca = "0.3"
+
+# Optional S3-compatible backend (AWS S3, Cloudflare R2, MinIO):
+apotheca = { version = "0.3", features = ["backend-s3"] }
 ```
 
 ## CLI
@@ -83,6 +88,11 @@ match cella.deposit(&name, b"world")? {
 let bytes = cella.get(&name)?;            // verified before return
 let meta  = cella.stat(&name)?;           // { size, sha256 } without reading bytes
 
+// Content-addressed callers (e.g. syntheca) MAY use `deposit_cas`:
+// when `name` is itself derived from the bytes, the caller asserts
+// the CAS invariant and apotheca skips the existence-collision read.
+cella.deposit_cas(&name, b"world")?;
+
 // Pinax namespace: compare-and-swap.
 let head = Name::new(b"head")?;
 cella.set_pinax(&head, b"v1", None)?;     // first publish (expected = absent)
@@ -109,9 +119,41 @@ where applicable, plus the operation-specific outcomes (`NotFound`,
 `Ok` variant of `SetPinaxOutcome`, not an error — it carries the observed
 `actual` digest for the caller's compare-and-swap retry loop.
 
-## On-disk layout
+## Backends
 
-A cella is a directory containing `deposita/`, `pinakes/`, and `tmp/`.
+The local-filesystem backend (above) is the default and requires no extra
+features. An S3-compatible backend covering AWS S3, Cloudflare R2, and MinIO
+is available behind the `backend-s3` Cargo feature; enabling it pulls in
+[`object_store`](https://crates.io/crates/object_store) and a tokio runtime
+(the `Cella` surface stays sync — a dedicated runtime drives the async
+calls internally).
+
+```rust
+# #[cfg(feature = "backend-s3")] {
+use apotheca::{Cella, S3Config};
+
+let config = S3Config::new()
+    .with_bucket("my-cella")
+    .with_region("us-east-1")
+    .with_access_key_id(std::env::var("AWS_ACCESS_KEY_ID")?)
+    .with_secret_access_key(std::env::var("AWS_SECRET_ACCESS_KEY")?);
+//  .with_endpoint("http://localhost:9000")           // R2 / MinIO
+//  .with_allow_http(true)                            // MinIO (no TLS)
+//  .with_virtual_hosted_style_request(false)         // MinIO (path-style)
+//  .with_prefix("foo/")                              // namespace inside the bucket
+
+let cella = Cella::open_s3(config)?;
+# }
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+`Cella` operations behave identically across backends; the integrity field
+travels as `x-amz-meta-apotheca-checksum` on S3 / R2 / MinIO and as the
+local backend's `meta` file on the filesystem (SPEC §3.3).
+
+## Local backend layout
+
+A local cella is a directory containing `deposita/`, `pinakes/`, and `tmp/`.
 
 ```
 <cella>/
@@ -144,18 +186,22 @@ through `get`, `get_pinax`, or `stat`.
 
 ## Status and scope
 
-Phase 2 reference implementation. Conformant with the apotheca Phase 2
-protocol: depositum operations and integrity, pinax operations with
+Reference implementation. Conformant with apotheca v1.0-rc2 on both
+surfaces: depositum operations and integrity, pinax operations with
 compare-and-swap and integrity, atomicity (crash-safe rename-based deposit;
-flock-guarded rename-over for set_pinax), Phase 1 name policy, local backend
-layout, and the `apo` CLI surface.
+flock-guarded rename-over for set_pinax), name policy (SPEC §4.1), local
+backend layout, and the `apo` CLI surface. The optional §2.6 `deposit_cas`
+operation is implemented on both backends; the `apo` binary stays on the
+mandatory surface (no `deposit-cas` verb) and exposes `deposit_cas` only
+through the library.
 
 Out of scope here: enumeration (deliberately — apotheca has no `ls`/`list`
 operation, and never will, so consumers have to maintain their own manifests),
 deletion (apotheca is write-once for deposita, compare-and-swap-replaceable
 but never deleted for pinakes; GC is a higher-layer concern operating on
-backends directly), additional backends, multi-backend composition,
-encryption, configuration files, and multi-segment names.
+backends directly), backends beyond local-filesystem and S3-compatible
+(GCS, Azure, scp, sftp), multi-backend composition, encryption,
+configuration files, and multi-segment names.
 
 ## License
 
