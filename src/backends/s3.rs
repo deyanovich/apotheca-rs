@@ -242,10 +242,12 @@ impl S3Backend {
         }
     }
 
-    /// SPEC §2.6. Trusted fast-path: skip the existence-collision
-    /// read; issue a single put-if-not-exists at the backend; on
-    /// `AlreadyExists`, return `Ok` because the caller's CAS
-    /// invariant asserts the bytes already match.
+    /// SPEC §2.6. Fast-path for content-addressed callers: skip the
+    /// pre-PUT existence read and issue a single put-if-not-exists.
+    /// On `AlreadyExists`, fall back to a HEAD to discriminate
+    /// `Ok` vs `Collision` — same path `deposit` takes on its own
+    /// race recovery, and required by §2.6's mandatory `Collision`
+    /// detection. The HEAD is only paid on the rare conflict branch.
     pub(crate) fn deposit_cas(
         &self,
         name: &Name<'_>,
@@ -258,9 +260,19 @@ impl S3Backend {
 
         match self.rt.block_on(self.store.put_opts(&path, payload, opts)) {
             Ok(_) => Ok(DepositOutcome::Ok),
-            // SPEC §2.6: caller's precondition stands as the guarantee
-            // that the stored bytes match; no read-back, return Ok.
-            Err(object_store::Error::AlreadyExists { .. }) => Ok(DepositOutcome::Ok),
+            Err(object_store::Error::AlreadyExists { .. }) => {
+                match self.head_meta(&path) {
+                    Ok(Some((_, existing))) => Ok(if existing == d {
+                        DepositOutcome::Ok
+                    } else {
+                        DepositOutcome::Collision
+                    }),
+                    Ok(None) => Err(DepositError::Io(io_from_obj(
+                        "object disappeared after AlreadyExists",
+                    ))),
+                    Err(e) => Err(deposit_obj_err(e)),
+                }
+            }
             Err(e) => Err(deposit_obj_err(e)),
         }
     }

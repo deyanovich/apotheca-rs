@@ -33,16 +33,13 @@ pub type Digest256 = [u8; 32];
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DepositOutcome {
     /// `name` was absent (now stored), or was present with bytes whose
-    /// digest equals sha256(bytes) — for `deposit`, an idempotent
-    /// re-deposit; for `deposit_cas`, the caller's CAS invariant
-    /// asserts the match.
+    /// digest equals sha256(bytes) — an idempotent re-deposit.
     Ok,
     /// `name` is present with bytes whose digest differs from
-    /// sha256(bytes). The stored bytes are unchanged.
-    ///
-    /// Reachable from `deposit` (SPEC §2.1). Not normally reachable
-    /// from `deposit_cas` (SPEC §2.6) — that operation trusts the
-    /// caller's CAS invariant rather than detecting collisions.
+    /// sha256(bytes). The stored bytes are unchanged. Reachable from
+    /// both `deposit` and `deposit_cas` (SPEC §2.1, §2.6 both
+    /// mandate detection); `deposit_cas` does the check on its
+    /// `AlreadyExists` branch rather than pre-emptively.
     Collision,
 }
 
@@ -195,10 +192,16 @@ impl Cella {
         }
     }
 
-    /// SPEC §2.6. Trusted fast-path for content-addressed callers.
-    /// The caller asserts that if a depositum is present under `name`,
-    /// its bytes equal `bytes`; apotheca skips the existence-collision
-    /// read.
+    /// SPEC §2.6. Fast-path for content-addressed callers. The caller
+    /// asserts that if a depositum is present under `name`, its bytes
+    /// equal `bytes`; apotheca skips the pre-PUT existence read.
+    ///
+    /// `Collision` detection is mandatory (SPEC §2.6) and reachable
+    /// here just as from `deposit`: the local backend detects by
+    /// delegating to `deposit`'s read-then-decide path, the S3
+    /// backend by issuing a HEAD on `AlreadyExists`. The freedom
+    /// `deposit_cas` retains over `deposit` is on the pre-emptive
+    /// existence read, not on whether to detect collisions.
     ///
     /// The hash function used to derive `name` is opaque to apotheca:
     /// callers MAY use any hash family (e.g. syntheca uses BLAKE3 for
